@@ -414,9 +414,8 @@ SCANNER_HTML = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { height: 60px; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-         background: transparent; padding: 4px 0; }
+         background: white; padding: 4px 0; }
 
   #scan-btn {
     width: 100%; padding: 14px 20px; font-size: 16px; font-weight: 600;
@@ -564,9 +563,6 @@ SCANNER_HTML = """<!DOCTYPE html>
     detected = false;
     scanBtn.style.display = 'none';
     statusEl.textContent  = 'Starting camera…';
-    // Expand iframe first; wait 200 ms for Streamlit to resize before
-    // html5-qrcode measures #reader (needs non-zero dimensions to initialise)
-    setIframeHeight(420);
     setTimeout(function() {
       readerWrap.style.display = 'block';
 
@@ -616,18 +612,10 @@ SCANNER_HTML = """<!DOCTYPE html>
     }).catch(function(err) {
       readerWrap.style.display = 'none';
       scanBtn.style.display    = 'block';
-      setIframeHeight(60);
       handleError(err);
     });
     }, 200); // end setTimeout — iframe has now had time to expand
   }
-
-  function setIframeHeight(h) {
-    document.documentElement.style.height = h + 'px';
-    document.body.style.height = h + 'px';
-    window.parent.postMessage({ isStreamlitMessage: true, type: 'streamlit:setFrameHeight', height: h }, '*');
-  }
-  setIframeHeight(60);
 
   function stopScan() {
     _showParentInputs();
@@ -641,7 +629,6 @@ SCANNER_HTML = """<!DOCTYPE html>
     if (refocusTimer) { clearInterval(refocusTimer); refocusTimer = null; }
     scanBtn.style.display = 'block';
     scanBtn.disabled      = false;
-    setIframeHeight(60);
     if (scanner) {
       scanner.stop().catch(function() {});
       scanner = null;
@@ -868,7 +855,7 @@ def show_scanner():
     if auto_search:
         st.session_state["auto_search"] = False
 
-    components.html(SCANNER_HTML, height=None)
+    components.html(SCANNER_HTML, height=500)
     if prefilled_barcode:
         st.caption(f"Last scan: `{prefilled_barcode}`")
 
