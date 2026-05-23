@@ -2,3 +2,4 @@ streamlit
 httpx
 supabase
 python-dotenv
+streamlit-javascript

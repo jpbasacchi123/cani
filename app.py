@@ -7,6 +7,7 @@ import httpx
 import streamlit as st
 import streamlit.components.v1 as components
 from dotenv import load_dotenv
+from streamlit_javascript import st_javascript
 from supabase import create_client
 
 from diet_rules import DIETS
@@ -151,6 +152,9 @@ for _k, _v in [
     ("refresh_token", None),
     ("scanned_barcode", ""),
     ("auto_search", False),
+    ("_ls_checked", False),
+    ("_tokens_persisted", False),
+    ("_clear_ls", False),
 ]:
     if _k not in st.session_state:
         st.session_state[_k] = _v
@@ -410,6 +414,7 @@ SCANNER_HTML = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 60px; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
          background: transparent; padding: 4px 0; }
 
@@ -557,10 +562,13 @@ SCANNER_HTML = """<!DOCTYPE html>
   // ── Scanner controls ──────────────────────────────────────────────────────
   function startScan() {
     detected = false;
-    // Show the reader container BEFORE start() so html5-qrcode can measure it
-    scanBtn.style.display    = 'none';
-    readerWrap.style.display = 'block';
-    statusEl.textContent     = 'Starting camera…';
+    scanBtn.style.display = 'none';
+    statusEl.textContent  = 'Starting camera…';
+    // Expand iframe first; wait 200 ms for Streamlit to resize before
+    // html5-qrcode measures #reader (needs non-zero dimensions to initialise)
+    setIframeHeight(420);
+    setTimeout(function() {
+      readerWrap.style.display = 'block';
 
     scanner = new Html5Qrcode('reader');
     scanner.start(
@@ -573,7 +581,6 @@ SCANNER_HTML = """<!DOCTYPE html>
     ).then(function() {
       closeBtn.style.display = 'block';
       statusEl.textContent = '📷 Center barcode in box · Tap to focus';
-      setIframeHeight(420);
       _hideParentInputs();
 
       // Apply best available focus mode, start periodic refocus, detect torch
@@ -609,13 +616,18 @@ SCANNER_HTML = """<!DOCTYPE html>
     }).catch(function(err) {
       readerWrap.style.display = 'none';
       scanBtn.style.display    = 'block';
+      setIframeHeight(60);
       handleError(err);
     });
+    }, 200); // end setTimeout — iframe has now had time to expand
   }
 
   function setIframeHeight(h) {
+    document.documentElement.style.height = h + 'px';
+    document.body.style.height = h + 'px';
     window.parent.postMessage({ isStreamlitMessage: true, type: 'streamlit:setFrameHeight', height: h }, '*');
   }
+  setIframeHeight(60);
 
   function stopScan() {
     _showParentInputs();
@@ -810,12 +822,15 @@ def show_scanner():
                 supabase.auth.sign_out()
             except Exception:
                 pass
-            st.session_state.user = None
-            st.session_state.selected_diets = []
-            st.session_state.screen = "welcome"
-            st.session_state.auth_error = ""
-            st.session_state.access_token = None
-            st.session_state.refresh_token = None
+            st.session_state.user              = None
+            st.session_state.selected_diets    = []
+            st.session_state.screen            = "welcome"
+            st.session_state.auth_error        = ""
+            st.session_state.access_token      = None
+            st.session_state.refresh_token     = None
+            st.session_state["_tokens_persisted"] = False
+            st.session_state["_ls_checked"]    = False
+            st.session_state["_clear_ls"]      = True
             st.rerun()
 
     selected_keys = st.session_state.selected_diets
@@ -853,7 +868,7 @@ def show_scanner():
     if auto_search:
         st.session_state["auto_search"] = False
 
-    components.html(SCANNER_HTML, height=60)
+    components.html(SCANNER_HTML, height=None)
     if prefilled_barcode:
         st.caption(f"Last scan: `{prefilled_barcode}`")
 
@@ -1042,6 +1057,67 @@ def show_history():
         except Exception as e:
             st.error(f"Could not clear history: {e}")
 
+
+# ── Persistent login (localStorage bridge) ───────────────────────────────────
+# 1. Sign-out requested: clear localStorage (deferred flag avoids rerun race)
+if st.session_state.get("_clear_ls"):
+    st.session_state["_clear_ls"] = False
+    st_javascript(
+        "localStorage.removeItem('cani_at');"
+        "localStorage.removeItem('cani_rt');"
+        "localStorage.removeItem('cani_lt');"
+    )
+
+# 2. Fresh login/signup: persist tokens to localStorage once per session
+elif st.session_state.access_token and not st.session_state["_tokens_persisted"]:
+    _at = st.session_state.access_token.replace("'", "\\'")
+    _rt = (st.session_state.refresh_token or "").replace("'", "\\'")
+    st_javascript(
+        f"localStorage.setItem('cani_at','{_at}');"
+        f"localStorage.setItem('cani_rt','{_rt}');"
+        f"localStorage.setItem('cani_lt',Date.now().toString());"
+    )
+    st.session_state["_tokens_persisted"] = True
+
+# 3. Page load with no active session: check localStorage for saved tokens
+elif st.session_state.user is None and not st.session_state["_ls_checked"]:
+    # JS returns '' if no token or token is older than 24 h, else the token string.
+    # st_javascript returns 0 (int) on first render while the JS is still in flight.
+    _ls_at = st_javascript(
+        "(function(){"
+        "var at=localStorage.getItem('cani_at'),"
+        "lt=localStorage.getItem('cani_lt');"
+        "if(!at||!lt)return '';"
+        "if(Date.now()-parseInt(lt)>86400000){"
+        "localStorage.removeItem('cani_at');"
+        "localStorage.removeItem('cani_rt');"
+        "localStorage.removeItem('cani_lt');"
+        "return '';}"
+        "return at;})()"
+    )
+    _ls_rt = st_javascript("localStorage.getItem('cani_rt')||''")
+    if _ls_at == 0 or _ls_rt == 0:
+        st.stop()  # JS not resolved yet — blank frame, rerun will follow
+    else:
+        st.session_state["_ls_checked"] = True
+        if _ls_at:
+            try:
+                _resp = supabase.auth.set_session(_ls_at, _ls_rt or "")
+                if _resp and _resp.user:
+                    st.session_state.user             = _resp.user
+                    st.session_state.access_token     = _ls_at
+                    st.session_state.refresh_token    = _ls_rt
+                    st.session_state["_tokens_persisted"] = True
+                    _after_login()  # navigates and reruns
+            except Exception:
+                # Token expired or revoked — wipe localStorage
+                st_javascript(
+                    "localStorage.removeItem('cani_at');"
+                    "localStorage.removeItem('cani_rt');"
+                    "localStorage.removeItem('cani_lt');"
+                )
+                st.session_state.access_token  = None
+                st.session_state.refresh_token = None
 
 # ── Router ────────────────────────────────────────────────────────────────────
 _screen = st.session_state.screen
